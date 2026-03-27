@@ -1,6 +1,6 @@
 streamlit==1.55.0
 mediapipe==0.10.33
-numpy
 streamlit-webrtc==0.64.5
 av==16.1.0
 reportlab
+numpy
