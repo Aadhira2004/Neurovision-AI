@@ -1,8 +1,5 @@
 import streamlit as st
 import av
-import os
-os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
-os.environ["OPENCV_VIDEOIO_PRIORITY_DSHOW"] = "0"
 import cv2
 import math
 import numpy as np
@@ -12,31 +9,25 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
 
+# Direct imports for macOS/M4 stability
 import mediapipe as mp
-mp_face_mesh = mp.solutions.face_mesh
+from mediapipe.solutions import face_mesh as mp_face_mesh
 
+# ---------------- CONFIG ----------------
 st.set_page_config(page_title="Neurovision AI", page_icon="🧠", layout="wide")
 
-# ---------------- EYE INDEX ----------------
+# Eye landmark indices
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 
 def calculate_ear(landmarks, eye_indices):
-    v1 = math.hypot(
-        landmarks[eye_indices[1]].x - landmarks[eye_indices[5]].x,
-        landmarks[eye_indices[1]].y - landmarks[eye_indices[5]].y
-    )
-    v2 = math.hypot(
-        landmarks[eye_indices[2]].x - landmarks[eye_indices[4]].x,
-        landmarks[eye_indices[2]].y - landmarks[eye_indices[4]].y
-    )
-    h = math.hypot(
-        landmarks[eye_indices[0]].x - landmarks[eye_indices[3]].x,
-        landmarks[eye_indices[0]].y - landmarks[eye_indices[3]].y
-    )
+    v1 = math.hypot(landmarks[eye_indices[1]].x - landmarks[eye_indices[5]].x,
+                    landmarks[eye_indices[1]].y - landmarks[eye_indices[5]].y)
+    v2 = math.hypot(landmarks[eye_indices[2]].x - landmarks[eye_indices[4]].x,
+                    landmarks[eye_indices[2]].y - landmarks[eye_indices[4]].y)
+    h = math.hypot(landmarks[eye_indices[0]].x - landmarks[eye_indices[3]].x,
+                   landmarks[eye_indices[0]].y - landmarks[eye_indices[3]].y)
     return (v1 + v2) / (2.0 * h)
 
 # ---------------- VIDEO PROCESSOR ----------------
@@ -44,133 +35,128 @@ class BlinkProcessor(VideoProcessorBase):
     def __init__(self):
         self.face_mesh = mp_face_mesh.FaceMesh(
             refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.6,
+            min_tracking_confidence=0.6
         )
         self.blinks = 0
         self.eye_closed = False
-        self.start_time = time.time()
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1) # Mirroring for user
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
 
         if results.multi_face_landmarks:
             mesh = results.multi_face_landmarks[0].landmark
-            avg_ear = (
-                calculate_ear(mesh, LEFT_EYE) +
-                calculate_ear(mesh, RIGHT_EYE)
-            ) / 2.0
+            avg_ear = (calculate_ear(mesh, LEFT_EYE) + calculate_ear(mesh, RIGHT_EYE)) / 2.0
 
-            if avg_ear < 0.21:
+            # Thresholds optimized for M4 FaceTime HD Camera
+            if avg_ear < 0.20:
                 self.eye_closed = True
-            elif avg_ear > 0.26 and self.eye_closed:
+            elif avg_ear > 0.25 and self.eye_closed:
                 self.blinks += 1
                 self.eye_closed = False
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# ---------------- APP ----------------
-st.title("🧠 Neurovision AI – Clinical Screening")
-
+# ---------------- APP LOGIC ----------------
 if "step" not in st.session_state:
     st.session_state.step = "scan"
 
-# ---------------- STAGE 1 ----------------
+st.title("🧠 Neurovision AI – Clinical Screening")
+
+# --- STAGE 1: SCAN ---
 if st.session_state.step == "scan":
-
     st.subheader("Stage 1: 60-Second Ocular Motor Analysis")
-
+    st.info("Ensure your face is well-lit. The timer starts when the camera activates.")
+    
+    timer_placeholder = st.empty()
+    
     ctx = webrtc_streamer(
-        key="blink",
+        key="blink-task",
         video_processor_factory=BlinkProcessor,
         media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
     if ctx.video_processor:
-        elapsed = int(time.time() - ctx.video_processor.start_time)
+        if "start_time" not in st.session_state:
+            st.session_state.start_time = time.time()
+        
+        elapsed = int(time.time() - st.session_state.start_time)
         remaining = max(0, 60 - elapsed)
+        
+        timer_placeholder.metric("Time Remaining", f"{remaining}s")
         st.progress(min(elapsed / 60, 1.0))
-        st.write(f"Time Remaining: {remaining} seconds")
 
         if elapsed >= 60:
             st.session_state.blinks = ctx.video_processor.blinks
             st.session_state.step = "questions"
             st.rerun()
+        else:
+            time.sleep(0.1)
+            st.rerun()
 
-# ---------------- STAGE 2 ----------------
+# --- STAGE 2: QUESTIONS ---
 elif st.session_state.step == "questions":
-
     st.subheader("Stage 2: Non-Motor Symptom Assessment")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Sleep Patterns**")
+        s1 = st.checkbox("Vivid or disturbing dreams")
+        s2 = st.checkbox("Talking or acting out dreams")
+        s3 = st.checkbox("Restless legs at night")
+    with col2:
+        st.markdown("**Olfactory Health**")
+        o1 = st.checkbox("Noticeable loss of smell")
+        o2 = st.checkbox("Food tastes bland/different")
+        o3 = st.checkbox("Trouble smelling coffee/smoke")
 
-    sleep_q = [
-        "Vivid dreams",
-        "Talking in sleep",
-        "Acting out dreams",
-        "Daytime sleepiness",
-        "Restless legs",
-    ]
-
-    smell_q = [
-        "Reduced smell",
-        "Food tastes bland",
-        "Cannot smell coffee",
-        "Trouble detecting smoke",
-        "General scent loss",
-    ]
-
-    s_score = sum([st.checkbox(q) for q in sleep_q])
-    o_score = sum([st.checkbox(q) for q in smell_q])
-
-    if st.button("Generate Clinical Report"):
-        st.session_state.s_score = s_score
-        st.session_state.o_score = o_score
+    if st.button("Generate Clinical Analysis"):
+        st.session_state.total_score = sum([s1, s2, s3, o1, o2, o3])
         st.session_state.step = "report"
         st.rerun()
 
-# ---------------- REPORT ----------------
+# --- STAGE 3: REPORT ---
 elif st.session_state.step == "report":
+    bpm = st.session_state.blinks
+    score = st.session_state.total_score
 
-    blinks = st.session_state.blinks
-    bpm = blinks  # since measured for 60 seconds
-    total_symptom = st.session_state.s_score + st.session_state.o_score
+    st.header("📋 Clinical Analysis Report")
+    
+    c1, c2 = st.columns(2)
+    c1.metric("Blink Rate", f"{bpm} BPM")
+    c2.metric("Symptom Score", f"{score}/6")
 
-    st.header("📋 Clinical Screening Report")
-
-    st.write(f"Blink Rate: {bpm} BPM")
-    st.write(f"Symptom Score: {total_symptom}")
-
-    if bpm < 12 and total_symptom >= 4:
-        st.error("High Clinical Correlation Detected")
-    elif bpm < 15 or total_symptom >= 3:
-        st.warning("Moderate Correlation")
+    if bpm < 12 and score >= 3:
+        st.error("Correlation: High. Please consult a neurological specialist.")
+    elif bpm < 15 or score >= 2:
+        st.warning("Correlation: Moderate. Consider follow-up monitoring.")
     else:
-        st.success("Low Correlation")
+        st.success("Correlation: Low. Results are within typical range.")
 
-    st.info("Normal Blink Range: 15–20 BPM")
-
-    # PDF DOWNLOAD
     if st.button("Download PDF Report"):
-        doc = SimpleDocTemplate("Neurovision_Report.pdf")
-        elements = []
-
-        style = ParagraphStyle(
-            name="Normal",
-            fontSize=12,
-            textColor=colors.black
-        )
-
-        elements.append(Paragraph("Neurovision AI Clinical Screening Report", style))
-        elements.append(Spacer(1, 0.3 * inch))
-        elements.append(Paragraph(f"Blink Rate: {bpm} BPM", style))
-        elements.append(Paragraph(f"Symptom Score: {total_symptom}", style))
-
+        filename = "Neurovision_Report.pdf"
+        doc = SimpleDocTemplate(filename)
+        styles = [ParagraphStyle(name='Title', fontSize=18, spaceAfter=20),
+                  ParagraphStyle(name='Body', fontSize=12, spaceAfter=10)]
+        
+        elements = [
+            Paragraph("Neurovision AI Clinical Report", styles[0]),
+            Spacer(1, 0.2*inch),
+            Paragraph(f"Blink Rate: {bpm} BPM", styles[1]),
+            Paragraph(f"Non-Motor Symptom Score: {score}/6", styles[1]),
+            Paragraph(f"Date: {time.strftime('%Y-%m-%d %H:%M')}", styles[1]),
+            Spacer(1, 0.5*inch),
+            Paragraph("Disclaimer: This is an AI screening tool, not a medical diagnosis.", styles[1])
+        ]
         doc.build(elements)
+        
+        with open(filename, "rb") as f:
+            st.download_button("Save Report", f, file_name=filename)
 
-        with open("Neurovision_Report.pdf", "rb") as f:
-            st.download_button(
-                "Click to Download",
-                f,
-                file_name="Neurovision_Report.pdf"
-            )
+    if st.button("Start New Session"):
+        for key in list(st.session_state.keys()): del st.session_state[key]
+        st.rerun()

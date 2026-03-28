@@ -1,5 +1,7 @@
 streamlit
-opencv-python-headless
-mediapipe
 streamlit-webrtc
-# Add any other libraries you use
+mediapipe
+opencv-python-headless
+av
+reportlab
+numpy
